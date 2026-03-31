@@ -1,0 +1,71 @@
+{
+  "name": "solana-batch-transfer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Solana 批量转账桌面应用 - 支持 SOL 和 SPL 代币的一对多、多对多、多对一转账",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --port 5188 --strictPort\" \"wait-on tcp:5188 && cross-env ELECTRON_RUN_AS_NODE= VITE_DEV_SERVER_URL=http://localhost:5188 electron .\"",
+    "dev:web": "vite",
+    "build": "vite build",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:win": "vite build && electron-builder --win",
+    "build:linux": "vite build && electron-builder --linux",
+    "build:all": "vite build && electron-builder --mac --win --linux",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.1.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "antd": "^6.3.4",
+    "bip39": "^3.1.0",
+    "bs58": "^6.0.0",
+    "buffer": "^6.0.3",
+    "ed25519-hd-key": "^1.3.0",
+    "papaparse": "^5.5.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "build": {
+    "appId": "com.solana.batch-transfer",
+    "productName": "Solana 批量转账",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "icon": "build/icon.png"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "devDependencies": {
+    "@types/papaparse": "^5.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.2",
+    "vite": "^5.4.21",
+    "vite-plugin-node-polyfills": "^0.26.0",
+    "wait-on": "^9.0.4"
+  }
+}
