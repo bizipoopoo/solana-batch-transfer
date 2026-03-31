@@ -19,12 +19,14 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   LoadingOutlined,
+  RetweetOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import WalletManager from './components/WalletManager'
 import OneToMany from './components/OneToMany'
 import ManyToMany from './components/ManyToMany'
 import ManyToOne from './components/ManyToOne'
+import FundRecovery from './components/FundRecovery'
 import {
   getConnection,
   validateTokenMint,
@@ -245,6 +247,15 @@ const App: React.FC = () => {
                   </span>
                 ),
                 children: <ManyToOne config={config} wallets={allWallets} />,
+              },
+              {
+                key: 'fund-recovery',
+                label: (
+                  <span>
+                    <RetweetOutlined /> 资金回收
+                  </span>
+                ),
+                children: <FundRecovery config={config} wallets={allWallets} />,
               },
             ]}
           />
