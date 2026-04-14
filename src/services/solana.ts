@@ -13,6 +13,7 @@ import {
   getAssociatedTokenAddress,
   getAccount,
   createTransferInstruction,
+  createCloseAccountInstruction,
   getMint,
 } from '@solana/spl-token'
 import bs58 from 'bs58'
@@ -256,7 +257,8 @@ export async function transferAllSPLToken(
   mint: PublicKey,
   decimals: number,
 ): Promise<string> {
-  const senderATA = await getOrCreateAssociatedTokenAccount(connection, sender, mint, sender.publicKey)
+  const senderATAAddress = await getAssociatedTokenAddress(mint, sender.publicKey)
+  const senderATA = await getAccount(connection, senderATAAddress)
   const recipientATA = await getOrCreateAssociatedTokenAccount(connection, sender, mint, recipient)
   const amount = senderATA.amount
   if (amount <= 0n) {
@@ -264,6 +266,9 @@ export async function transferAllSPLToken(
   }
   const transaction = new Transaction().add(
     createTransferInstruction(senderATA.address, recipientATA.address, sender.publicKey, amount),
+    // When sweeping all SPL tokens, also close the emptied sender ATA
+    // so its rent is reclaimed to the next wallet in the chain.
+    createCloseAccountInstruction(senderATA.address, recipient, sender.publicKey),
   )
   return sendAndConfirmTransaction(connection, transaction, [sender])
 }
