@@ -1,7 +1,7 @@
 {
   "name": "solana-batch-transfer",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Solana 批量转账桌面应用 - 支持 SOL 和 SPL 代币的一对多、多对多、多对一转账",
   "main": "electron/main.js",
   "scripts": {
