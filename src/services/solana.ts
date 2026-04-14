@@ -15,6 +15,7 @@ import {
   createTransferInstruction,
   createCloseAccountInstruction,
   getMint,
+  TOKEN_PROGRAM_ID,
 } from '@solana/spl-token'
 import bs58 from 'bs58'
 import type { Network } from '../types'
@@ -271,6 +272,92 @@ export async function transferAllSPLToken(
     createCloseAccountInstruction(senderATA.address, recipient, sender.publicKey),
   )
   return sendAndConfirmTransaction(connection, transaction, [sender])
+}
+
+export interface SweepWalletResult {
+  txHashes: string[]
+  closedTokenAccounts: number
+  transferredTokenAccounts: number
+  transferredSOL: number
+}
+
+/**
+ * Sweep a wallet to the next wallet in the chain:
+ * 1. Scan all SPL token accounts owned by sender
+ * 2. If a token account has balance, transfer all tokens to recipient's ATA, then close it
+ * 3. If a token account is empty, close it directly
+ * 4. Transfer remaining SOL to recipient (minus fee)
+ */
+export async function sweepWalletToNext(
+  connection: Connection,
+  sender: Keypair,
+  recipient: PublicKey,
+): Promise<SweepWalletResult> {
+  const txHashes: string[] = []
+  let closedTokenAccounts = 0
+  let transferredTokenAccounts = 0
+  let transferredSOL = 0
+
+  const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
+    sender.publicKey,
+    { programId: TOKEN_PROGRAM_ID },
+    'confirmed',
+  )
+
+  for (const { pubkey, account } of tokenAccounts.value) {
+    const parsed = account.data.parsed
+    if (!parsed || parsed.type !== 'account') continue
+
+    const info = parsed.info
+    const mint = new PublicKey(info.mint)
+    const amount = BigInt(info.tokenAmount.amount)
+    const tokenAccountAddress = pubkey
+
+    const transaction = new Transaction()
+
+    if (amount > 0n) {
+      const recipientATA = await getOrCreateAssociatedTokenAccount(
+        connection,
+        sender,
+        mint,
+        recipient,
+      )
+      transaction.add(
+        createTransferInstruction(
+          tokenAccountAddress,
+          recipientATA.address,
+          sender.publicKey,
+          amount,
+        ),
+      )
+      transferredTokenAccounts += 1
+    }
+
+    transaction.add(
+      createCloseAccountInstruction(tokenAccountAddress, recipient, sender.publicKey),
+    )
+
+    const txHash = await sendAndConfirmTransaction(connection, transaction, [sender])
+    txHashes.push(txHash)
+    closedTokenAccounts += 1
+  }
+
+  const balance = await connection.getBalance(sender.publicKey)
+  const fee = await estimateSOLTransferFee(connection, sender, recipient)
+  const lamportsToSend = balance - fee
+
+  if (lamportsToSend > 0) {
+    const txHash = await transferAllSOL(connection, sender, recipient)
+    txHashes.push(txHash)
+    transferredSOL = lamportsToSend / LAMPORTS_PER_SOL
+  }
+
+  return {
+    txHashes,
+    closedTokenAccounts,
+    transferredTokenAccounts,
+    transferredSOL,
+  }
 }
 
 export function randomAmount(min: number, max: number): number {

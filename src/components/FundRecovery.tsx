@@ -22,15 +22,13 @@ import type { TransferConfig, TransferStatus, ManagedWallet } from '../types'
 import {
   getConnection,
   keypairFromPrivateKey,
-  transferAllSOL,
-  transferAllSPLToken,
   getExplorerUrl,
   shortenAddress,
   getSOLBalance,
-  getTokenBalance,
+  sweepWalletToNext,
 } from '../services/solana'
 import WalletPickerModal from './WalletPickerModal'
-import { PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js'
+import { PublicKey } from '@solana/web3.js'
 
 const { Text, Link } = Typography
 
@@ -40,10 +38,13 @@ interface RecoveryStep {
   fromAddress: string
   toAddress: string
   status: TransferStatus
-  txHash?: string
+  txHashes?: string[]
   error?: string
-  balanceBefore?: number
-  balanceAfter?: number
+  solBefore?: number
+  solAfter?: number
+  closedTokenAccounts?: number
+  transferredTokenAccounts?: number
+  transferredSOL?: number
 }
 
 const STATUS_MAP: Record<TransferStatus, { color: string; text: string }> = {
@@ -97,7 +98,6 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
 
   const execute = async () => {
     if (steps.length === 0) return message.warning('请先选择钱包')
-    if (config.tokenType === 'SPL' && !config.tokenMint) return message.error('请先查询并确认代币')
 
     setExecuting(true)
     cancelRef.current = false
@@ -122,45 +122,23 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
       try {
         const sender = keypairFromPrivateKey(fromWallet.privateKey)
         const recipientPk = new PublicKey(step.toAddress)
-
-        let balanceBefore: number
-        if (config.tokenType === 'SOL') {
-          balanceBefore = await getSOLBalance(connection, sender.publicKey)
-        } else {
-          balanceBefore = await getTokenBalance(connection, sender.publicKey, new PublicKey(config.tokenMint))
-        }
-
-        if (config.tokenType === 'SOL' && balanceBefore < 0.000005) {
-          setSteps((p) => p.map((s, idx) =>
-            idx === i ? { ...s, status: 'failed', error: `余额不足 (${balanceBefore} SOL)`, balanceBefore } : s,
-          ))
-          continue
-        }
-
-        if (config.tokenType === 'SPL' && balanceBefore <= 0) {
-          setSteps((p) => p.map((s, idx) =>
-            idx === i ? { ...s, status: 'failed', error: '代币余额为 0', balanceBefore } : s,
-          ))
-          continue
-        }
-
-        const txHash =
-          config.tokenType === 'SOL'
-            ? await transferAllSOL(connection, sender, recipientPk)
-            : await transferAllSPLToken(
-                connection, sender, recipientPk,
-                new PublicKey(config.tokenMint), config.tokenDecimals,
-              )
-
-        let balanceAfter: number
-        if (config.tokenType === 'SOL') {
-          balanceAfter = await getSOLBalance(connection, recipientPk)
-        } else {
-          balanceAfter = await getTokenBalance(connection, recipientPk, new PublicKey(config.tokenMint))
-        }
+        const solBefore = await getSOLBalance(connection, sender.publicKey)
+        const result = await sweepWalletToNext(connection, sender, recipientPk)
+        const solAfter = await getSOLBalance(connection, recipientPk)
 
         setSteps((p) => p.map((s, idx) =>
-          idx === i ? { ...s, status: 'success', txHash, balanceBefore, balanceAfter } : s,
+          idx === i
+            ? {
+                ...s,
+                status: 'success',
+                txHashes: result.txHashes,
+                solBefore,
+                solAfter,
+                closedTokenAccounts: result.closedTokenAccounts,
+                transferredTokenAccounts: result.transferredTokenAccounts,
+                transferredSOL: result.transferredSOL,
+              }
+            : s,
         ))
       } catch (err: any) {
         setSteps((p) => p.map((s, idx) =>
@@ -217,10 +195,26 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
       ),
     },
     {
-      title: '转出余额', dataIndex: 'balanceBefore', width: 130,
+      title: '回收结果', width: 220,
+      render: (_: unknown, record: RecoveryStep) => (
+        <Space direction="vertical" size={0}>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            关闭账户: {record.closedTokenAccounts ?? 0}
+          </Text>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            转移代币账户: {record.transferredTokenAccounts ?? 0}
+          </Text>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            转出 SOL: {(record.transferredSOL ?? 0).toFixed(6)}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '执行前 SOL', dataIndex: 'solBefore', width: 130,
       render: (v?: number) =>
         v != null
-          ? <Text style={{ fontFamily: 'monospace' }}>{v.toFixed(6)} {config.tokenType === 'SOL' ? 'SOL' : ''}</Text>
+          ? <Text style={{ fontFamily: 'monospace' }}>{v.toFixed(6)} SOL</Text>
           : <Text type="secondary">--</Text>,
     },
     {
@@ -228,12 +222,26 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
       render: (s: TransferStatus) => <Tag color={STATUS_MAP[s].color}>{STATUS_MAP[s].text}</Tag>,
     },
     {
-      title: '交易哈希', dataIndex: 'txHash', width: 170,
-      render: (hash: string) =>
-        hash ? (
-          <Link href={getExplorerUrl(hash, config.network)} target="_blank" style={{ fontFamily: 'monospace', fontSize: 12 }}>
-            {shortenAddress(hash, 8)}
-          </Link>
+      title: '交易', width: 180,
+      render: (_: unknown, record: RecoveryStep) =>
+        record.txHashes && record.txHashes.length > 0 ? (
+          <Space direction="vertical" size={0}>
+            {record.txHashes.slice(0, 3).map((hash) => (
+              <Link
+                key={hash}
+                href={getExplorerUrl(hash, config.network)}
+                target="_blank"
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+              >
+                {shortenAddress(hash, 8)}
+              </Link>
+            ))}
+            {record.txHashes.length > 3 && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                还有 {record.txHashes.length - 3} 笔
+              </Text>
+            )}
+          </Space>
         ) : '-',
     },
     {
@@ -258,10 +266,10 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
         message="资金回收模式"
         description={
           <span>
-            选择一组钱包后，系统会从第 1 个钱包开始，依次将全部余额转入下一个钱包，
-            像滚雪球一样逐级归集，最终所有资金汇聚到<strong>最后一个钱包</strong>中。
-            在 `SPL` 模式下，转完全部代币后还会自动关闭空的代币账户 `ATA`，
-            把其中的租金一并退回到下一个钱包。请确保第 1 个钱包有足够的 SOL 支付手续费。
+            选择一组钱包后，系统会从第 1 个钱包开始，依次扫描当前钱包下的全部 SPL 账户。
+            空账户会直接关闭回收租金；有余额的账户会先把代币转到下一个钱包，再关闭账户回收租金；
+            最后把当前钱包剩余的 SOL 也转给下一个钱包。这样资金会像滚雪球一样逐级归集，
+            最终汇聚到<strong>最后一个钱包</strong>中。请确保第 1 个钱包有基础 SOL 用于启动整个回收链。
           </span>
         }
       />
@@ -312,9 +320,9 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
                       {shortenAddress(lastWallet, 10)}
                     </Text>
                   )}
-                  {lastSuccessStep?.balanceAfter != null && (
+                  {lastSuccessStep?.solAfter != null && (
                     <Tag color="green" style={{ marginLeft: 8 }}>
-                      余额: {lastSuccessStep.balanceAfter.toFixed(6)} {config.tokenType === 'SOL' ? 'SOL' : config.tokenSymbol}
+                      当前 SOL: {lastSuccessStep.solAfter.toFixed(6)}
                     </Tag>
                   )}
                 </span>
