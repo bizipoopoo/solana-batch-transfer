@@ -20,7 +20,7 @@ import {
 import bs58 from 'bs58'
 import type { Network } from '../types'
 
-const MAINNET_RPC = 'https://dawn-small-theorem.solana-mainnet.quiknode.pro/0d31dd8d25f4e580c5c486960f69f361efb0b961/'
+const MAINNET_RPC = 'https://blissful-quaint-panorama.solana-mainnet.quiknode.pro/04d12d7889e8d672c64b70caff7fc9863b9eeff3/'
 
 export function getRpcUrl(network: Network, customUrl?: string): string {
   if (network === 'custom' && customUrl) return customUrl

@@ -9,6 +9,7 @@ import {
   Tooltip,
   Alert,
   Progress,
+  InputNumber,
 } from 'antd'
 import {
   PlayCircleOutlined,
@@ -31,6 +32,7 @@ import WalletPickerModal from './WalletPickerModal'
 import { PublicKey } from '@solana/web3.js'
 
 const { Text, Link } = Typography
+const RETRY_DELAY_MS = 1500
 
 interface RecoveryStep {
   key: string
@@ -65,6 +67,7 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
   const [executing, setExecuting] = useState(false)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [currentStep, setCurrentStep] = useState(-1)
+  const [maxRetries, setMaxRetries] = useState(3)
   const cancelRef = useRef(false)
 
   const buildSteps = useCallback((addresses: string[]) => {
@@ -119,31 +122,67 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
 
       setSteps((p) => p.map((s, idx) => (idx === i ? { ...s, status: 'processing', error: undefined } : s)))
 
-      try {
-        const sender = keypairFromPrivateKey(fromWallet.privateKey)
-        const recipientPk = new PublicKey(step.toAddress)
-        const solBefore = await getSOLBalance(connection, sender.publicKey)
-        const result = await sweepWalletToNext(connection, sender, recipientPk)
-        const solAfter = await getSOLBalance(connection, recipientPk)
+      let finished = false
+      for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+        try {
+          const sender = keypairFromPrivateKey(fromWallet.privateKey)
+          const recipientPk = new PublicKey(step.toAddress)
+          const solBefore = await getSOLBalance(connection, sender.publicKey)
+          const result = await sweepWalletToNext(connection, sender, recipientPk)
+          const solAfter = await getSOLBalance(connection, recipientPk)
 
-        setSteps((p) => p.map((s, idx) =>
-          idx === i
-            ? {
-                ...s,
-                status: 'success',
-                txHashes: result.txHashes,
-                solBefore,
-                solAfter,
-                closedTokenAccounts: result.closedTokenAccounts,
-                transferredTokenAccounts: result.transferredTokenAccounts,
-                transferredSOL: result.transferredSOL,
-              }
-            : s,
-        ))
-      } catch (err: any) {
-        setSteps((p) => p.map((s, idx) =>
-          idx === i ? { ...s, status: 'failed', error: err.message } : s,
-        ))
+          setSteps((p) => p.map((s, idx) =>
+            idx === i
+              ? {
+                  ...s,
+                  status: 'success',
+                  txHashes: result.txHashes,
+                  solBefore,
+                  solAfter,
+                  closedTokenAccounts: result.closedTokenAccounts,
+                  transferredTokenAccounts: result.transferredTokenAccounts,
+                  transferredSOL: result.transferredSOL,
+                  error: attempt > 1 ? `第 ${attempt} 次尝试成功` : undefined,
+                }
+              : s,
+          ))
+          finished = true
+          break
+        } catch (err: any) {
+          const errorMessage = err?.message || '未知错误'
+          const hasRetryLeft = attempt <= maxRetries && !cancelRef.current
+
+          if (hasRetryLeft) {
+            setSteps((p) => p.map((s, idx) =>
+              idx === i
+                ? {
+                    ...s,
+                    status: 'processing',
+                    error: `第 ${attempt} 次失败：${errorMessage}，${RETRY_DELAY_MS / 1000} 秒后自动重试`,
+                  }
+                : s,
+            ))
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
+            continue
+          }
+
+          setSteps((p) => p.map((s, idx) =>
+            idx === i
+              ? {
+                  ...s,
+                  status: 'failed',
+                  error:
+                    maxRetries > 0
+                      ? `已重试 ${maxRetries} 次仍失败：${errorMessage}`
+                      : errorMessage,
+                }
+              : s,
+          ))
+          break
+        }
+      }
+
+      if (!finished) {
         break
       }
     }
@@ -278,6 +317,19 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
         <Button type="primary" icon={<TeamOutlined />} onClick={() => setPickerOpen(true)} disabled={executing}>
           选择回收钱包链
         </Button>
+        <Space size={4}>
+          <Text type="secondary">自动重试:</Text>
+          <InputNumber
+            min={0}
+            max={10}
+            value={maxRetries}
+            onChange={(v) => setMaxRetries(v ?? 3)}
+            disabled={executing}
+            size="small"
+            style={{ width: 72 }}
+          />
+          <Text type="secondary">次</Text>
+        </Space>
         {selectedAddresses.length > 0 && (
           <>
             <Tag color="blue">{selectedAddresses.length} 个钱包 / {steps.length} 步</Tag>
@@ -333,6 +385,7 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
           <Alert type="info" showIcon style={{ marginBottom: 16 }} message={
             <Space split="|">
               <span>共 {steps.length} 步</span>
+              <span>自动重试: {maxRetries} 次</span>
               {successCount > 0 && <span style={{ color: '#52c41a' }}>完成: {successCount}</span>}
               {failedCount > 0 && <span style={{ color: '#ff4d4f' }}>失败: {failedCount}</span>}
               {executing && currentStep >= 0 && <span style={{ color: '#1890ff' }}>正在执行第 {currentStep + 1} 步</span>}
