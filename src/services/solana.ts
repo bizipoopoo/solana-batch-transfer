@@ -4,6 +4,7 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
+  VersionedTransaction,
   sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
   clusterApiUrl,
@@ -14,13 +15,19 @@ import {
   getAccount,
   createTransferInstruction,
   createCloseAccountInstruction,
+  createBurnInstruction,
   getMint,
   TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
 } from '@solana/spl-token'
 import bs58 from 'bs58'
 import type { Network } from '../types'
 
 const MAINNET_RPC = 'https://blissful-quaint-panorama.solana-mainnet.quiknode.pro/04d12d7889e8d672c64b70caff7fc9863b9eeff3/'
+const WSOL_MINT = 'So11111111111111111111111111111111111111112'
+const JUPITER_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote'
+const JUPITER_SWAP_URL = 'https://lite-api.jup.ag/swap/v1/swap'
+const DEFAULT_SLIPPAGE_BPS = 100
 
 export function getRpcUrl(network: Network, customUrl?: string): string {
   if (network === 'custom' && customUrl) return customUrl
@@ -274,19 +281,154 @@ export async function transferAllSPLToken(
   return sendAndConfirmTransaction(connection, transaction, [sender])
 }
 
+interface OwnedTokenAccountInfo {
+  address: PublicKey
+  mint: PublicKey
+  amount: bigint
+  programId: PublicKey
+}
+
 export interface SweepWalletResult {
   txHashes: string[]
   closedTokenAccounts: number
-  transferredTokenAccounts: number
+  soldTokenAccounts: number
+  burnedTokenAccounts: number
+  failedTokenAccounts: number
   transferredSOL: number
+  failureMessages: string[]
+}
+
+class UnsellableTokenError extends Error {}
+
+async function fetchJsonOrThrow<T>(input: string, init?: RequestInit): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(input, init)
+  } catch (error: any) {
+    throw new Error(`请求失败: ${error?.message || '网络错误'}`)
+  }
+
+  const text = await response.text()
+  const data = text ? JSON.parse(text) : {}
+  if (!response.ok) {
+    const message = data?.error || data?.message || text || `HTTP ${response.status}`
+    if (response.status >= 400 && response.status < 500) {
+      throw new UnsellableTokenError(message)
+    }
+    throw new Error(message)
+  }
+  return data as T
+}
+
+async function getOwnedTokenAccounts(
+  connection: Connection,
+  owner: PublicKey,
+): Promise<OwnedTokenAccountInfo[]> {
+  const tokenPrograms = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]
+  const results = await Promise.all(
+    tokenPrograms.map((programId) =>
+      connection.getParsedTokenAccountsByOwner(owner, { programId }, 'confirmed'),
+    ),
+  )
+
+  return results.flatMap((result, idx) =>
+    result.value.flatMap(({ pubkey, account }) => {
+      const parsed = account.data.parsed
+      if (!parsed || parsed.type !== 'account') return []
+      return [{
+        address: pubkey,
+        mint: new PublicKey(parsed.info.mint),
+        amount: BigInt(parsed.info.tokenAmount.amount),
+        programId: tokenPrograms[idx],
+      }]
+    }),
+  )
+}
+
+async function sellTokenToSOLViaJupiter(
+  connection: Connection,
+  sender: Keypair,
+  mint: PublicKey,
+  amount: bigint,
+  slippageBps = DEFAULT_SLIPPAGE_BPS,
+): Promise<string> {
+  const params = new URLSearchParams({
+    inputMint: mint.toBase58(),
+    outputMint: WSOL_MINT,
+    amount: amount.toString(),
+    slippageBps: slippageBps.toString(),
+  })
+
+  const quote = await fetchJsonOrThrow<any>(`${JUPITER_QUOTE_URL}?${params.toString()}`)
+  if (!quote?.routePlan?.length) {
+    throw new UnsellableTokenError('Jupiter 无可用卖出路由')
+  }
+
+  const swapResponse = await fetchJsonOrThrow<any>(JUPITER_SWAP_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      quoteResponse: quote,
+      userPublicKey: sender.publicKey.toBase58(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+    }),
+  })
+
+  if (!swapResponse?.swapTransaction) {
+    throw new Error('Jupiter 未返回可执行交易')
+  }
+
+  const serialized = Uint8Array.from(Buffer.from(swapResponse.swapTransaction, 'base64'))
+  const transaction = VersionedTransaction.deserialize(serialized)
+  transaction.sign([sender])
+
+  const signature = await connection.sendRawTransaction(transaction.serialize(), {
+    skipPreflight: false,
+    maxRetries: 3,
+  })
+  await connection.confirmTransaction(signature, 'confirmed')
+  return signature
+}
+
+async function closeTokenAccount(
+  connection: Connection,
+  sender: Keypair,
+  tokenAccount: PublicKey,
+  destination: PublicKey,
+  programId: PublicKey,
+): Promise<string> {
+  const transaction = new Transaction().add(
+    createCloseAccountInstruction(tokenAccount, destination, sender.publicKey, [], programId),
+  )
+  return sendAndConfirmTransaction(connection, transaction, [sender])
+}
+
+async function burnAndCloseTokenAccount(
+  connection: Connection,
+  sender: Keypair,
+  tokenAccount: PublicKey,
+  mint: PublicKey,
+  amount: bigint,
+  destination: PublicKey,
+  programId: PublicKey,
+): Promise<string> {
+  const transaction = new Transaction().add(
+    createBurnInstruction(tokenAccount, mint, sender.publicKey, amount, [], programId),
+    createCloseAccountInstruction(tokenAccount, destination, sender.publicKey, [], programId),
+  )
+  return sendAndConfirmTransaction(connection, transaction, [sender])
 }
 
 /**
  * Sweep a wallet to the next wallet in the chain:
  * 1. Scan all SPL token accounts owned by sender
- * 2. If a token account has balance, transfer all tokens to recipient's ATA, then close it
- * 3. If a token account is empty, close it directly
- * 4. Transfer remaining SOL to recipient (minus fee)
+ * 2. Empty account => close directly and reclaim rent
+ * 3. WSOL account => close directly to unwrap
+ * 4. Non-empty token account => try sell to SOL via Jupiter
+ * 5. If unsellable => burn then close
+ * 6. If any token account still fails, abort before final SOL transfer
+ * 7. Transfer remaining SOL to recipient (minus fee)
  */
 export async function sweepWalletToNext(
   connection: Connection,
@@ -295,51 +437,77 @@ export async function sweepWalletToNext(
 ): Promise<SweepWalletResult> {
   const txHashes: string[] = []
   let closedTokenAccounts = 0
-  let transferredTokenAccounts = 0
+  let soldTokenAccounts = 0
+  let burnedTokenAccounts = 0
+  let failedTokenAccounts = 0
   let transferredSOL = 0
+  const failureMessages: string[] = []
 
-  const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
-    sender.publicKey,
-    { programId: TOKEN_PROGRAM_ID },
-    'confirmed',
-  )
+  const tokenAccounts = await getOwnedTokenAccounts(connection, sender.publicKey)
 
-  for (const { pubkey, account } of tokenAccounts.value) {
-    const parsed = account.data.parsed
-    if (!parsed || parsed.type !== 'account') continue
+  for (const tokenAccount of tokenAccounts) {
+    const mintStr = tokenAccount.mint.toBase58()
 
-    const info = parsed.info
-    const mint = new PublicKey(info.mint)
-    const amount = BigInt(info.tokenAmount.amount)
-    const tokenAccountAddress = pubkey
-
-    const transaction = new Transaction()
-
-    if (amount > 0n) {
-      const recipientATA = await getOrCreateAssociatedTokenAccount(
-        connection,
-        sender,
-        mint,
-        recipient,
-      )
-      transaction.add(
-        createTransferInstruction(
-          tokenAccountAddress,
-          recipientATA.address,
+    try {
+      if (tokenAccount.amount === 0n || mintStr === WSOL_MINT) {
+        const closeSig = await closeTokenAccount(
+          connection,
+          sender,
+          tokenAccount.address,
           sender.publicKey,
-          amount,
-        ),
-      )
-      transferredTokenAccounts += 1
+          tokenAccount.programId,
+        )
+        txHashes.push(closeSig)
+        closedTokenAccounts += 1
+        continue
+      }
+
+      try {
+        const sellSig = await sellTokenToSOLViaJupiter(
+          connection,
+          sender,
+          tokenAccount.mint,
+          tokenAccount.amount,
+        )
+        txHashes.push(sellSig)
+        soldTokenAccounts += 1
+
+        const closeSig = await closeTokenAccount(
+          connection,
+          sender,
+          tokenAccount.address,
+          sender.publicKey,
+          tokenAccount.programId,
+        )
+        txHashes.push(closeSig)
+        closedTokenAccounts += 1
+      } catch (error: any) {
+        if (!(error instanceof UnsellableTokenError)) {
+          throw error
+        }
+
+        const burnCloseSig = await burnAndCloseTokenAccount(
+          connection,
+          sender,
+          tokenAccount.address,
+          tokenAccount.mint,
+          tokenAccount.amount,
+          sender.publicKey,
+          tokenAccount.programId,
+        )
+        txHashes.push(burnCloseSig)
+        burnedTokenAccounts += 1
+        closedTokenAccounts += 1
+      }
+    } catch (error: any) {
+      failedTokenAccounts += 1
+      failureMessages.push(`${shortenAddress(mintStr, 8)}: ${error?.message || '处理失败'}`)
+      continue
     }
+  }
 
-    transaction.add(
-      createCloseAccountInstruction(tokenAccountAddress, recipient, sender.publicKey),
-    )
-
-    const txHash = await sendAndConfirmTransaction(connection, transaction, [sender])
-    txHashes.push(txHash)
-    closedTokenAccounts += 1
+  if (failedTokenAccounts > 0) {
+    throw new Error(`有 ${failedTokenAccounts} 个代币账户处理失败：${failureMessages.join('；')}`)
   }
 
   const balance = await connection.getBalance(sender.publicKey)
@@ -355,8 +523,11 @@ export async function sweepWalletToNext(
   return {
     txHashes,
     closedTokenAccounts,
-    transferredTokenAccounts,
+    soldTokenAccounts,
+    burnedTokenAccounts,
+    failedTokenAccounts,
     transferredSOL,
+    failureMessages,
   }
 }
 

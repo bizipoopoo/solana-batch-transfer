@@ -45,7 +45,9 @@ interface RecoveryStep {
   solBefore?: number
   solAfter?: number
   closedTokenAccounts?: number
-  transferredTokenAccounts?: number
+  soldTokenAccounts?: number
+  burnedTokenAccounts?: number
+  failedTokenAccounts?: number
   transferredSOL?: number
 }
 
@@ -140,7 +142,9 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
                   solBefore,
                   solAfter,
                   closedTokenAccounts: result.closedTokenAccounts,
-                  transferredTokenAccounts: result.transferredTokenAccounts,
+                  soldTokenAccounts: result.soldTokenAccounts,
+                  burnedTokenAccounts: result.burnedTokenAccounts,
+                  failedTokenAccounts: result.failedTokenAccounts,
                   transferredSOL: result.transferredSOL,
                   error: attempt > 1 ? `第 ${attempt} 次尝试成功` : undefined,
                 }
@@ -241,7 +245,13 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
             关闭账户: {record.closedTokenAccounts ?? 0}
           </Text>
           <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
-            转移代币账户: {record.transferredTokenAccounts ?? 0}
+            卖出账户: {record.soldTokenAccounts ?? 0}
+          </Text>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            销毁账户: {record.burnedTokenAccounts ?? 0}
+          </Text>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            失败账户: {record.failedTokenAccounts ?? 0}
           </Text>
           <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
             转出 SOL: {(record.transferredSOL ?? 0).toFixed(6)}
@@ -292,6 +302,10 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
   const successCount = steps.filter((s) => s.status === 'success').length
   const failedCount = steps.filter((s) => s.status === 'failed').length
   const progressPercent = steps.length > 0 ? Math.round((successCount / steps.length) * 100) : 0
+  const totalClosedAccounts = steps.reduce((sum, step) => sum + (step.closedTokenAccounts ?? 0), 0)
+  const totalSoldAccounts = steps.reduce((sum, step) => sum + (step.soldTokenAccounts ?? 0), 0)
+  const totalBurnedAccounts = steps.reduce((sum, step) => sum + (step.burnedTokenAccounts ?? 0), 0)
+  const totalTransferredSOL = steps.reduce((sum, step) => sum + (step.transferredSOL ?? 0), 0)
 
   const lastWallet = selectedAddresses.length > 0 ? selectedAddresses[selectedAddresses.length - 1] : null
   const lastSuccessStep = [...steps].reverse().find((s) => s.status === 'success')
@@ -306,9 +320,9 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
         description={
           <span>
             选择一组钱包后，系统会从第 1 个钱包开始，依次扫描当前钱包下的全部 SPL 账户。
-            空账户会直接关闭回收租金；有余额的账户会先把代币转到下一个钱包，再关闭账户回收租金；
-            最后把当前钱包剩余的 SOL 也转给下一个钱包。这样资金会像滚雪球一样逐级归集，
-            最终汇聚到<strong>最后一个钱包</strong>中。请确保第 1 个钱包有基础 SOL 用于启动整个回收链。
+            有余额的账户会优先通过 Jupiter 卖成 SOL；如果卖不掉，则按你的要求直接销毁代币并关闭账户；
+            空账户会直接关闭回收租金。每一步收回来的 SOL 最后都会继续转给下一个钱包，
+            像滚雪球一样逐级归集，最终汇聚到<strong>最后一个钱包</strong>中。
           </span>
         }
       />
@@ -386,6 +400,10 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
             <Space split="|">
               <span>共 {steps.length} 步</span>
               <span>自动重试: {maxRetries} 次</span>
+              <span>累计卖出: {totalSoldAccounts}</span>
+              <span>累计销毁: {totalBurnedAccounts}</span>
+              <span>累计关闭: {totalClosedAccounts}</span>
+              <span>累计转出 SOL: {totalTransferredSOL.toFixed(6)}</span>
               {successCount > 0 && <span style={{ color: '#52c41a' }}>完成: {successCount}</span>}
               {failedCount > 0 && <span style={{ color: '#ff4d4f' }}>失败: {failedCount}</span>}
               {executing && currentStep >= 0 && <span style={{ color: '#1890ff' }}>正在执行第 {currentStep + 1} 步</span>}
