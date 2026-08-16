@@ -24,7 +24,7 @@ export interface ManagedWallet {
   privateKey: string
   groupId: string
   groupName: string
-  derivationIndex: number
+  derivationIndex?: number
   solBalance?: number
   tokenBalance?: number
 }

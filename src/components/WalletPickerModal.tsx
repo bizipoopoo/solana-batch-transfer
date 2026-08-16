@@ -39,7 +39,7 @@ const WalletPickerModal: React.FC<Props> = ({
         (w) =>
           w.address.toLowerCase().includes(q) ||
           w.groupName.toLowerCase().includes(q) ||
-          String(w.derivationIndex).includes(q),
+          (w.derivationIndex != null && String(w.derivationIndex).includes(q)),
       )
     }
     return list
@@ -146,7 +146,8 @@ const WalletPickerModal: React.FC<Props> = ({
             {
               title: '#',
               dataIndex: 'derivationIndex',
-              width: 50,
+              width: 60,
+              render: (index?: number) => index ?? '私钥',
             },
             {
               title: '地址',

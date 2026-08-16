@@ -20,10 +20,11 @@ import {
   DeleteOutlined,
   KeyOutlined,
   ReloadOutlined,
+  ImportOutlined,
 } from '@ant-design/icons'
 import type { WalletGroup, TokenType } from '../types'
 import { isValidMnemonic, deriveWallets } from '../services/mnemonic'
-import { shortenAddress } from '../services/solana'
+import { shortenAddress, walletFromPrivateKey } from '../services/solana'
 
 interface Props {
   groups: WalletGroup[]
@@ -45,10 +46,14 @@ const WalletManager: React.FC<Props> = ({
   const [modalOpen, setModalOpen] = useState(false)
   const [mnemonic, setMnemonic] = useState('')
   const [groupName, setGroupName] = useState('')
+  const [privateKeyModalOpen, setPrivateKeyModalOpen] = useState(false)
+  const [privateKeys, setPrivateKeys] = useState('')
+  const [privateKeyGroupName, setPrivateKeyGroupName] = useState('')
   const [startIndex, setStartIndex] = useState(0)
   const [count, setCount] = useState(10)
   const [refreshing, setRefreshing] = useState(false)
   const [generating, setGenerating] = useState(false)
+  const [importingPrivateKeys, setImportingPrivateKeys] = useState(false)
 
   const allWallets = groups.flatMap((g) => g.wallets)
   const allWalletCount = allWallets.length
@@ -100,11 +105,78 @@ const WalletManager: React.FC<Props> = ({
     }
   }
 
+  const handlePrivateKeyImport = async () => {
+    const entries = privateKeys
+      .split(/\r?\n/)
+      .map((value, index) => ({ value: value.trim(), line: index + 1 }))
+      .filter((entry) => entry.value)
+
+    if (entries.length === 0) return message.warning('请输入私钥')
+
+    setImportingPrivateKeys(true)
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      const parsed: Array<{ address: string; privateKey: string }> = []
+      const invalidLines: number[] = []
+
+      for (const entry of entries) {
+        try {
+          parsed.push(walletFromPrivateKey(entry.value))
+        } catch {
+          invalidLines.push(entry.line)
+        }
+      }
+
+      if (invalidLines.length > 0) {
+        const visibleLines = invalidLines.slice(0, 10).join('、')
+        const suffix = invalidLines.length > 10 ? ` 等 ${invalidLines.length} 行` : ''
+        return message.error(`第 ${visibleLines}${suffix} 私钥格式无效，请检查后重试`)
+      }
+
+      const knownAddresses = new Set(allWallets.map((wallet) => wallet.address))
+      const uniqueWallets = parsed.filter((wallet) => {
+        if (knownAddresses.has(wallet.address)) return false
+        knownAddresses.add(wallet.address)
+        return true
+      })
+      const duplicateCount = parsed.length - uniqueWallets.length
+
+      if (uniqueWallets.length === 0) {
+        return message.warning('没有可导入的新钱包，输入的地址均已存在或重复')
+      }
+
+      const id = `${Date.now()}-${Math.random()}`
+      const name = privateKeyGroupName.trim() || `私钥组 ${groups.length + 1}`
+      const group: WalletGroup = {
+        id,
+        name,
+        wallets: uniqueWallets.map((wallet) => ({
+          ...wallet,
+          groupId: id,
+          groupName: name,
+        })),
+      }
+
+      onAddGroup(group)
+      setPrivateKeys('')
+      setPrivateKeyGroupName('')
+      setPrivateKeyModalOpen(false)
+      message.success(
+        `已导入 ${uniqueWallets.length} 个钱包${
+          duplicateCount > 0 ? `，跳过 ${duplicateCount} 个重复地址` : ''
+        }`,
+      )
+    } finally {
+      setImportingPrivateKeys(false)
+    }
+  }
+
   const columns: any[] = [
     {
       title: '#',
       width: 50,
-      render: (_: any, r: any) => r.derivationIndex,
+      render: (_: any, r: any, index: number) => r.derivationIndex ?? index + 1,
     },
     {
       title: '地址',
@@ -157,7 +229,9 @@ const WalletManager: React.FC<Props> = ({
         type="secondary"
         style={{ fontFamily: 'monospace', fontSize: 12 }}
       >
-        m/44'/501'/{r.derivationIndex}'/0'
+        {r.derivationIndex == null
+          ? '导入私钥'
+          : `m/44'/501'/${r.derivationIndex}'/0'`}
       </Typography.Text>
     ),
   })
@@ -202,6 +276,9 @@ const WalletManager: React.FC<Props> = ({
               </Button>
             </Tooltip>
           )}
+          <Button icon={<ImportOutlined />} onClick={() => setPrivateKeyModalOpen(true)}>
+            批量导入私钥
+          </Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setModalOpen(true)}>
             导入助记词
           </Button>
@@ -210,7 +287,7 @@ const WalletManager: React.FC<Props> = ({
 
       {groups.length === 0 ? (
         <Alert
-          message="请先导入助记词生成钱包，所有转账操作都基于已导入的钱包"
+          message="请先导入助记词或私钥添加钱包，所有转账操作都基于已导入的钱包"
           type="info"
           showIcon
         />
@@ -227,7 +304,7 @@ const WalletManager: React.FC<Props> = ({
             ),
             extra: (
               <Popconfirm
-                title="确定删除该助记词组及所有钱包？"
+                title="确定删除该钱包组及所有钱包？"
                 onConfirm={(e) => {
                   e?.stopPropagation()
                   onRemoveGroup(group.id)
@@ -316,6 +393,51 @@ const WalletManager: React.FC<Props> = ({
                 />
               </Form.Item>
             </Space>
+          </Form>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="批量导入私钥"
+        open={privateKeyModalOpen}
+        onCancel={() => {
+          setPrivateKeyModalOpen(false)
+          setPrivateKeys('')
+          setPrivateKeyGroupName('')
+        }}
+        onOk={handlePrivateKeyImport}
+        okText="导入钱包"
+        cancelText="取消"
+        width={640}
+        destroyOnClose
+        confirmLoading={importingPrivateKeys}
+        okButtonProps={{ disabled: importingPrivateKeys }}
+        cancelButtonProps={{ disabled: importingPrivateKeys }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <Alert
+            type="warning"
+            showIcon
+            message="私钥仅保留在内存中，关闭应用后自动清除，不会持久化"
+            description="请确保当前环境安全，不要导入仍在其他重要场景使用的私钥。"
+          />
+          <Form layout="vertical">
+            <Form.Item label="私钥列表">
+              <Input.TextArea
+                placeholder={'每行输入一个私钥，支持 Base58 或 JSON 数组格式\n例如：3Xf...abc\n或：[12,34,...,56]'}
+                value={privateKeys}
+                onChange={(e) => setPrivateKeys(e.target.value)}
+                rows={10}
+                style={{ fontFamily: 'monospace' }}
+              />
+            </Form.Item>
+            <Form.Item label="备注名称（可选）" style={{ marginBottom: 0 }}>
+              <Input
+                placeholder="如：批量钱包、交易钱包..."
+                value={privateKeyGroupName}
+                onChange={(e) => setPrivateKeyGroupName(e.target.value)}
+              />
+            </Form.Item>
           </Form>
         </Space>
       </Modal>

@@ -47,8 +47,10 @@ interface RecoveryStep {
   closedTokenAccounts?: number
   soldTokenAccounts?: number
   burnedTokenAccounts?: number
+  skippedTokenAccounts?: number
   failedTokenAccounts?: number
   transferredSOL?: number
+  skippedSOLReason?: string
 }
 
 const STATUS_MAP: Record<TransferStatus, { color: string; text: string }> = {
@@ -132,6 +134,14 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
           const solBefore = await getSOLBalance(connection, sender.publicKey)
           const result = await sweepWalletToNext(connection, sender, recipientPk)
           const solAfter = await getSOLBalance(connection, recipientPk)
+          const notices: string[] = []
+          if (result.skippedTokenAccounts > 0) {
+            notices.push(
+              `已跳过 ${result.skippedTokenAccounts} 个冻结代币账户：${result.failureMessages.join('；')}`,
+            )
+          }
+          if (result.skippedSOLReason) notices.push(result.skippedSOLReason)
+          if (attempt > 1) notices.push(`第 ${attempt} 次尝试成功`)
 
           setSteps((p) => p.map((s, idx) =>
             idx === i
@@ -144,9 +154,11 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
                   closedTokenAccounts: result.closedTokenAccounts,
                   soldTokenAccounts: result.soldTokenAccounts,
                   burnedTokenAccounts: result.burnedTokenAccounts,
+                  skippedTokenAccounts: result.skippedTokenAccounts,
                   failedTokenAccounts: result.failedTokenAccounts,
                   transferredSOL: result.transferredSOL,
-                  error: attempt > 1 ? `第 ${attempt} 次尝试成功` : undefined,
+                  skippedSOLReason: result.skippedSOLReason,
+                  error: notices.length > 0 ? notices.join('；') : undefined,
                 }
               : s,
           ))
@@ -251,11 +263,17 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
             销毁账户: {record.burnedTokenAccounts ?? 0}
           </Text>
           <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            跳过账户: {record.skippedTokenAccounts ?? 0}
+          </Text>
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
             失败账户: {record.failedTokenAccounts ?? 0}
           </Text>
           <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
             转出 SOL: {(record.transferredSOL ?? 0).toFixed(6)}
           </Text>
+          {record.skippedSOLReason && (
+            <Text type="warning" style={{ fontSize: 12 }}>小额 SOL: 已跳过</Text>
+          )}
         </Space>
       ),
     },
@@ -294,8 +312,10 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
         ) : '-',
     },
     {
-      title: '错误', dataIndex: 'error', ellipsis: true,
-      render: (err: string) => err ? <Text type="danger" ellipsis={{ tooltip: err }}>{err}</Text> : '-',
+      title: '提示 / 错误', dataIndex: 'error', ellipsis: true,
+      render: (err: string, record) => err
+        ? <Text type={record.status === 'failed' ? 'danger' : 'warning'} ellipsis={{ tooltip: err }}>{err}</Text>
+        : '-',
     },
   ]
 
@@ -305,6 +325,8 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
   const totalClosedAccounts = steps.reduce((sum, step) => sum + (step.closedTokenAccounts ?? 0), 0)
   const totalSoldAccounts = steps.reduce((sum, step) => sum + (step.soldTokenAccounts ?? 0), 0)
   const totalBurnedAccounts = steps.reduce((sum, step) => sum + (step.burnedTokenAccounts ?? 0), 0)
+  const totalSkippedAccounts = steps.reduce((sum, step) => sum + (step.skippedTokenAccounts ?? 0), 0)
+  const skippedSOLCount = steps.filter((step) => step.skippedSOLReason).length
   const totalTransferredSOL = steps.reduce((sum, step) => sum + (step.transferredSOL ?? 0), 0)
 
   const lastWallet = selectedAddresses.length > 0 ? selectedAddresses[selectedAddresses.length - 1] : null
@@ -321,7 +343,9 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
           <span>
             选择一组钱包后，系统会从第 1 个钱包开始，依次扫描当前钱包下的全部 SPL 账户。
             有余额的账户会优先通过 Jupiter 卖成 SOL；如果卖不掉，则按你的要求直接销毁代币并关闭账户；
-            空账户会直接关闭回收租金。每一步收回来的 SOL 最后都会继续转给下一个钱包，
+            冻结账户无法由钱包自行处理，会自动记录并跳过；空账户会直接关闭回收租金。
+            无法支付手续费或不足以创建目标账户的极小 SOL 余额也会自动跳过。
+            每一步收回来的 SOL 最后都会继续转给下一个钱包，
             像滚雪球一样逐级归集，最终汇聚到<strong>最后一个钱包</strong>中。
           </span>
         }
@@ -402,6 +426,8 @@ const FundRecovery: React.FC<Props> = ({ config, wallets }) => {
               <span>自动重试: {maxRetries} 次</span>
               <span>累计卖出: {totalSoldAccounts}</span>
               <span>累计销毁: {totalBurnedAccounts}</span>
+              <span>累计跳过: {totalSkippedAccounts}</span>
+              <span>跳过小额钱包: {skippedSOLCount}</span>
               <span>累计关闭: {totalClosedAccounts}</span>
               <span>累计转出 SOL: {totalTransferredSOL.toFixed(6)}</span>
               {successCount > 0 && <span style={{ color: '#52c41a' }}>完成: {successCount}</span>}

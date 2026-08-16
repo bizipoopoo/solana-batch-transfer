@@ -23,7 +23,6 @@ import {
 import bs58 from 'bs58'
 import type { Network } from '../types'
 
-const MAINNET_RPC = 'https://blissful-quaint-panorama.solana-mainnet.quiknode.pro/04d12d7889e8d672c64b70caff7fc9863b9eeff3/'
 const WSOL_MINT = 'So11111111111111111111111111111111111111112'
 const JUPITER_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote'
 const JUPITER_SWAP_URL = 'https://lite-api.jup.ag/swap/v1/swap'
@@ -31,8 +30,7 @@ const DEFAULT_SLIPPAGE_BPS = 100
 
 export function getRpcUrl(network: Network, customUrl?: string): string {
   if (network === 'custom' && customUrl) return customUrl
-  if (network === 'mainnet-beta') return MAINNET_RPC
-  return clusterApiUrl(network as 'devnet' | 'testnet')
+  return clusterApiUrl(network as 'mainnet-beta' | 'devnet' | 'testnet')
 }
 
 export function getConnection(network: Network, customUrl?: string): Connection {
@@ -47,6 +45,17 @@ export function keypairFromPrivateKey(key: string): Keypair {
   } catch {
     const arr = JSON.parse(trimmed)
     return Keypair.fromSecretKey(new Uint8Array(arr))
+  }
+}
+
+export function walletFromPrivateKey(key: string): {
+  address: string
+  privateKey: string
+} {
+  const keypair = keypairFromPrivateKey(key)
+  return {
+    address: keypair.publicKey.toBase58(),
+    privateKey: bs58.encode(keypair.secretKey),
   }
 }
 
@@ -237,6 +246,8 @@ export async function estimateSOLTransferFee(
   return 5000
 }
 
+class SkippableSOLTransferError extends Error {}
+
 export async function transferAllSOL(
   connection: Connection,
   sender: Keypair,
@@ -246,7 +257,19 @@ export async function transferAllSOL(
   const fee = await estimateSOLTransferFee(connection, sender, recipient)
   const lamportsToSend = balance - fee
   if (lamportsToSend <= 0) {
-    throw new Error(`余额不足以支付手续费 (余额: ${balance / LAMPORTS_PER_SOL} SOL, 手续费: ${fee / LAMPORTS_PER_SOL} SOL)`)
+    throw new SkippableSOLTransferError(
+      `余额不足以支付手续费 (余额: ${balance / LAMPORTS_PER_SOL} SOL, 手续费: ${fee / LAMPORTS_PER_SOL} SOL)`,
+    )
+  }
+
+  const recipientInfo = await connection.getAccountInfo(recipient, 'confirmed')
+  if (!recipientInfo) {
+    const minimumRent = await connection.getMinimumBalanceForRentExemption(0, 'confirmed')
+    if (lamportsToSend < minimumRent) {
+      throw new SkippableSOLTransferError(
+        `目标钱包尚未创建，扣除手续费后可转 ${lamportsToSend} lamports，低于创建账户所需的 ${minimumRent} lamports`,
+      )
+    }
   }
   const transaction = new Transaction().add(
     SystemProgram.transfer({
@@ -286,6 +309,7 @@ interface OwnedTokenAccountInfo {
   mint: PublicKey
   amount: bigint
   programId: PublicKey
+  isFrozen: boolean
 }
 
 export interface SweepWalletResult {
@@ -293,8 +317,10 @@ export interface SweepWalletResult {
   closedTokenAccounts: number
   soldTokenAccounts: number
   burnedTokenAccounts: number
+  skippedTokenAccounts: number
   failedTokenAccounts: number
   transferredSOL: number
+  skippedSOLReason?: string
   failureMessages: string[]
 }
 
@@ -340,6 +366,7 @@ async function getOwnedTokenAccounts(
         mint: new PublicKey(parsed.info.mint),
         amount: BigInt(parsed.info.tokenAmount.amount),
         programId: tokenPrograms[idx],
+        isFrozen: parsed.info.state === 'frozen',
       }]
     }),
   )
@@ -427,8 +454,9 @@ async function burnAndCloseTokenAccount(
  * 3. WSOL account => close directly to unwrap
  * 4. Non-empty token account => try sell to SOL via Jupiter
  * 5. If unsellable => burn then close
- * 6. If any token account still fails, abort before final SOL transfer
- * 7. Transfer remaining SOL to recipient (minus fee)
+ * 6. Frozen account => record and skip because only the freeze authority can thaw it
+ * 7. If any other token account still fails, abort before final SOL transfer
+ * 8. Transfer remaining SOL to recipient (minus fee)
  */
 export async function sweepWalletToNext(
   connection: Connection,
@@ -439,14 +467,24 @@ export async function sweepWalletToNext(
   let closedTokenAccounts = 0
   let soldTokenAccounts = 0
   let burnedTokenAccounts = 0
+  let skippedTokenAccounts = 0
   let failedTokenAccounts = 0
   let transferredSOL = 0
+  let skippedSOLReason: string | undefined
   const failureMessages: string[] = []
 
   const tokenAccounts = await getOwnedTokenAccounts(connection, sender.publicKey)
 
   for (const tokenAccount of tokenAccounts) {
     const mintStr = tokenAccount.mint.toBase58()
+
+    if (tokenAccount.isFrozen) {
+      skippedTokenAccounts += 1
+      failureMessages.push(
+        `${shortenAddress(mintStr, 8)}: 账户已冻结，只能由冻结权限持有者解冻，已跳过`,
+      )
+      continue
+    }
 
     try {
       if (tokenAccount.amount === 0n || mintStr === WSOL_MINT) {
@@ -514,10 +552,17 @@ export async function sweepWalletToNext(
   const fee = await estimateSOLTransferFee(connection, sender, recipient)
   const lamportsToSend = balance - fee
 
-  if (lamportsToSend > 0) {
-    const txHash = await transferAllSOL(connection, sender, recipient)
-    txHashes.push(txHash)
-    transferredSOL = lamportsToSend / LAMPORTS_PER_SOL
+  if (lamportsToSend <= 0) {
+    skippedSOLReason = `余额不足以支付手续费，已跳过 (${balance} lamports)`
+  } else {
+    try {
+      const txHash = await transferAllSOL(connection, sender, recipient)
+      txHashes.push(txHash)
+      transferredSOL = lamportsToSend / LAMPORTS_PER_SOL
+    } catch (error: any) {
+      if (!(error instanceof SkippableSOLTransferError)) throw error
+      skippedSOLReason = `${error.message}，已跳过`
+    }
   }
 
   return {
@@ -525,8 +570,10 @@ export async function sweepWalletToNext(
     closedTokenAccounts,
     soldTokenAccounts,
     burnedTokenAccounts,
+    skippedTokenAccounts,
     failedTokenAccounts,
     transferredSOL,
+    skippedSOLReason,
     failureMessages,
   }
 }

@@ -53,7 +53,7 @@ const WalletSelect: React.FC<WalletSelectProps> = ({
       options={Object.entries(grouped).map(([groupName, gWallets]) => ({
         label: groupName,
         options: gWallets.map((w) => ({
-          label: `#${w.derivationIndex}  ${shortenAddress(w.address, 6)}${formatBalance(w)}`,
+          label: `${w.derivationIndex == null ? '[私钥]' : `#${w.derivationIndex}`}  ${shortenAddress(w.address, 6)}${formatBalance(w)}`,
           value: w.address,
         })),
       }))}
