@@ -20,6 +20,7 @@ import {
   CloseCircleOutlined,
   LoadingOutlined,
   RetweetOutlined,
+  HeartOutlined,
 } from '@ant-design/icons'
 import zhCN from 'antd/locale/zh_CN'
 import WalletManager from './components/WalletManager'
@@ -27,6 +28,7 @@ import OneToMany from './components/OneToMany'
 import ManyToMany from './components/ManyToMany'
 import ManyToOne from './components/ManyToOne'
 import FundRecovery from './components/FundRecovery'
+import Donation from './components/Donation'
 import {
   getConnection,
   validateTokenMint,
@@ -256,6 +258,15 @@ const App: React.FC = () => {
                   </span>
                 ),
                 children: <FundRecovery config={config} wallets={allWallets} />,
+              },
+              {
+                key: 'donation',
+                label: (
+                  <span>
+                    <HeartOutlined /> 捐赠
+                  </span>
+                ),
+                children: <Donation />,
               },
             ]}
           />

@@ -106,3 +106,35 @@ body {
   margin-bottom: 20px;
   flex-wrap: wrap;
 }
+
+.donation-card {
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.donation-heart {
+  color: #eb2f96;
+  font-size: 48px;
+  filter: drop-shadow(0 4px 8px rgba(235, 47, 150, 0.25));
+}
+
+.donation-qr {
+  padding: 18px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+
+.donation-address-block {
+  width: 640px;
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.donation-address-input input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+}
